@@ -199,7 +199,7 @@ def get_player_by_username(username):
     row = cur.fetchone()
     conn.close()
     return row
-
+    
 def register_player(user_id, username, game_id, device="MOBILE"):
     conn = sqlite3.connect(DB)
     conn.execute('''INSERT OR REPLACE INTO players
