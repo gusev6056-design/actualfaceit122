@@ -1,4 +1,4 @@
-TOKEN = "YOUR_TOKEN_HERE"
+TOKEN = "8914521673:AAHaGCPmSq5PF6nu9xlEWm2DQe_-qPXx5QI"
 ADMIN_ID = 8521250777
 MAPS = ["Breeze", "Rust", "Province", "Sakura", "Sandstone"]
 ACCEPT_TIMEOUT = 60
