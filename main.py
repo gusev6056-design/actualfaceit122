@@ -35,7 +35,7 @@ from cards import (
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 init_db()
 
-# Flask приложение для Render
+# Flask для Render
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -60,6 +60,7 @@ screenshot_pend = {}
 manage_target = {}
 lobby_messages = {}
 veto_messages = {}
+match_registration = {}
 
 # ═══════════════════════════════════════════════════════════════════
 # ПРОВЕРКА БАНА
@@ -232,13 +233,12 @@ def _send_profile(uid, chat_id, league="all"):
     try:
         img = create_profile_card(p, stats, badges, _league_label(league))
         bot.send_photo(chat_id, img, reply_markup=_profile_kb(uid, league))
-    except Exception as e:
+    except:
         text = (f"👤 <b>{p[1]}</b>\n"
                 f"LVL {stats['level']} | ELO: {stats['elo']}\n"
                 f"💰 Монеты: {stats['coins']}\n"
                 f"📊 K/D: {stats['kd']} | Винрейт: {stats['winrate']}%\n"
-                f"🏆 Победы: {stats['wins']} | Поражения: {stats['losses']}\n"
-                f"🎯 Убийства: {stats['kills']} | Смерти: {stats['deaths']}")
+                f"🏆 Победы: {stats['wins']} | Поражения: {stats['losses']}")
         bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=_profile_kb(uid, league))
 
 def _main_menu_kb(uid):
@@ -378,7 +378,7 @@ def cmd_top(msg):
     try:
         img = create_top_card(get_top_players(10))
         bot.send_photo(msg.chat.id, img)
-    except Exception as e:
+    except:
         top = get_top_players(10)
         text = "🏆 <b>Топ игроков</b>\n\n"
         for i, (name, gid, elo, wins, losses, kills, deaths) in enumerate(top, 1):
@@ -540,7 +540,6 @@ def handle_nick_change(msg):
     user_flow.pop(uid, None)
     bot.send_message(uid, f"✅ Ник изменён: <b>{old}</b> → <b>{text}</b>", parse_mode="HTML")
     send_log(f"✏️ {old} (#{uid}) → ник: {text}")
-
 # ═══════════════════════════════════════════════════════════════════
 # ПОИСК МАТЧА (ЛОББИ)
 # ═══════════════════════════════════════════════════════════════════
@@ -845,7 +844,6 @@ def _cancel_timer(key, uid):
     t = accept_timers.pop(tk, None)
     if t:
         t.cancel()
-
 # ═══════════════════════════════════════════════════════════════════
 # ПРИНЯТИЕ МАТЧА
 # ═══════════════════════════════════════════════════════════════════
@@ -995,9 +993,9 @@ def _send_veto(key):
     if not lob or lob["status"] != "veto":
         return
     turn = lob["veto_turn"]
-    # Капитан - первый игрок в списке (рандомно, но пока так)
+    # Капитан - первый игрок в списке
     players = lob["players"]
-    cap_id = players[0]  # временно первый игрок
+    cap_id = players[0]
     
     if _is_bot_player(cap_id):
         threading.Timer(2.0, _bot_ban, [key]).start()
@@ -1015,7 +1013,7 @@ def _send_veto(key):
     for m in lob["map_pool"]:
         kb.add(types.InlineKeyboardButton(f"❌ Забанить {m}", callback_data=f"ban_{key}_{m}"))
     
-    # Отправляем всем игрокам (но только капитан может банить)
+    # Отправляем всем игрокам (только капитан может банить)
     for uid in lob["players"]:
         try:
             _delete_previous_message(uid, "veto", key)
@@ -1048,7 +1046,7 @@ def cb_ban(c):
         return
     
     turn = lob["veto_turn"]
-    cap_id = lob["players"][0]  # временно первый игрок
+    cap_id = lob["players"][0]
     
     if uid != cap_id:
         bot.answer_callback_query(c.id, "Сейчас не твой ход! Банит капитан")
@@ -1165,9 +1163,8 @@ def _start_match_with_teams(key, map_name):
             print(e)
     
     send_log(f"⚔️ Матч #{mid} | {map_name} | {key} | CT: {len(team_ct)} | T: {len(team_t)}")
-
 # ═══════════════════════════════════════════════════════════════════
-# СИСТЕМА ЖАЛОБ/ТИКЕТОВ (через кнопку)
+# СИСТЕМА ЖАЛОБ (через кнопку)
 # ═══════════════════════════════════════════════════════════════════
 
 @bot.message_handler(func=lambda m: m.text == "📋 Подать жалобу")
@@ -1236,32 +1233,22 @@ def handle_screenshot(msg):
     file_id = msg.photo[-1].file_id
     match["screenshot_file_id"] = file_id
     
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✏️ Ввести статистику", callback_data=f"enterstats_{mid}"))
-    
-    caption = (f"📸 Скриншот матча <b>#{mid}</b>\n"
-               f"Карта: {match['map_name']} | Лига: {match['league']}\n\n"
-               f"🟦 CT: {', '.join(_pname(u) for u in match['team_ct'])}\n"
-               f"🟧 T: {', '.join(_pname(u) for u in match['team_t'])}")
-    
-    # Отправляем админам для подтверждения
-    notified = set()
-    for aid in match["team_ct"] + match["team_t"]:
-        if _is_admin(aid) and aid not in notified:
-            try:
-                bot.send_photo(aid, file_id, caption=caption, reply_markup=kb, parse_mode="HTML")
-                notified.add(aid)
-            except:
-                pass
-    
-    if ADMIN_ID not in notified:
-        try:
-            bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=kb, parse_mode="HTML")
-        except:
-            pass
+    # Сохраняем в match_registration
+    if mid not in match_registration:
+        match_registration[mid] = {"screenshots": [], "chat_id": msg.chat.id, "message_id": None}
+    match_registration[mid]["screenshots"].append({"user_id": uid, "file_id": file_id})
     
     bot.send_message(uid, "✅ Скриншот отправлен! Администратор обработает результат.")
     send_log(f"📸 Скриншот матча #{mid} от {_pname(uid)}")
+    
+    # Отправляем админу уведомление
+    for aid in get_all_admins():
+        try:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("✏️ Ввести статистику", callback_data=f"enterstats_{mid}"))
+            bot.send_photo(aid, file_id, caption=f"📸 Новый скриншот матча #{mid} от {_pname(uid)}", reply_markup=kb)
+        except:
+            pass
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("enterstats_"))
 def cb_enter_stats(c):
@@ -1277,32 +1264,25 @@ def cb_enter_stats(c):
         bot.send_message(uid, "❌ Матч не найден")
         return
     
-    ct_names = "\n".join([f"• {_pname(u)}" for u in match["team_ct"]])
-    t_names = "\n".join([f"• {_pname(u)}" for u in match["team_t"]])
+    ct_names = "\n".join([f"• {_pname(u)} (ID: {u})" for u in match["team_ct"]])
+    t_names = "\n".join([f"• {_pname(u)} (ID: {u})" for u in match["team_t"]])
     
     stats_pending[uid] = mid
     bot.send_message(uid,
                      f"✏️ <b>Ввод статистики матча #{mid}</b>\n\n"
                      f"🟦 <b>CT</b>:\n{ct_names}\n\n"
                      f"🟧 <b>T</b>:\n{t_names}\n\n"
-                     f"📝 <b>Формат ввода:</b>\n"
-                     f"<code>Счёт_победителя:Счёт_проигравшего\n"
-                     f"CT\n"
-                     f"ID_игрока K A D\n"
-                     f"ID_игрока K A D\n"
-                     f"... (5 игроков CT)\n"
-                     f"T\n"
-                     f"ID_игрока K A D\n"
-                     f"ID_игрока K A D\n"
-                     f"... (5 игроков T)</code>\n\n"
+                     f"📝 <b>Формат ввода (КАЖДОГО игрока через запятую):</b>\n"
+                     f"<code>ID_игрока K A D, ID_игрока K A D, ...</code>\n\n"
+                     f"📌 <b>ВАЖНО!</b>\n"
+                     f"• Указывайте сторону, за которую победившая команда НАЧИНАЛА игру\n"
+                     f"• Сначала введите статистику команды CT, затем T\n\n"
                      f"Пример:\n"
-                     f"<code>13:11\n"
-                     f"CT\n"
-                     f"8521250777 18 5 2\n"
-                     f"123456789 15 8 3\n"
+                     f"<code>CT\n"
+                     f"8521250777 18 5 2, 123456789 15 8 3, ...\n"
                      f"T\n"
-                     f"987654321 12 10 4</code>\n\n"
-                     f"💡 ID игрока можно найти в его профиле",
+                     f"987654321 12 10 4, ...</code>\n\n"
+                     f"💡 Счёт укажите первой строкой: 13:11 или 13:5",
                      parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.from_user.id in stats_pending)
@@ -1320,7 +1300,7 @@ def handle_stats_input(msg):
     try:
         lines = [l.strip() for l in msg.text.splitlines() if l.strip()]
         if len(lines) < 3:
-            raise ValueError("Слишком мало строк")
+            raise ValueError("Слишком мало строк. Нужно: счёт, CT, статистика CT, T, статистика T")
         
         # Парсим счёт
         score_parts = lines[0].replace(" ", "").split(":")
@@ -1330,7 +1310,11 @@ def handle_stats_input(msg):
         score_w, score_l = int(score_parts[0]), int(score_parts[1])
         
         # Определяем победителя
-        winner = None
+        winner = "ct" if score_w >= score_l else "t"
+        score_ct = score_w if winner == "ct" else score_l
+        score_t = score_l if winner == "ct" else score_w
+        
+        # Парсим статистику
         ct_entries = []
         t_entries = []
         current_side = None
@@ -1343,46 +1327,34 @@ def handle_stats_input(msg):
                 current_side = "t"
                 continue
             
-            parts = line.split()
-            if len(parts) >= 4:
-                try:
-                    pid = int(parts[0])
-                    k = int(parts[1])
-                    a = int(parts[2])
-                    d = int(parts[3])
-                    if current_side == "ct":
-                        ct_entries.append((pid, k, a, d))
-                    elif current_side == "t":
-                        t_entries.append((pid, k, a, d))
-                except ValueError:
+            # Разбираем строку с игроками (через запятую)
+            parts = line.split(",")
+            for part in parts:
+                part = part.strip()
+                if not part:
                     continue
+                nums = part.split()
+                if len(nums) >= 4:
+                    try:
+                        pid = int(nums[0])
+                        k = int(nums[1])
+                        a = int(nums[2])
+                        d = int(nums[3])
+                        if current_side == "ct":
+                            ct_entries.append((pid, k, a, d))
+                        elif current_side == "t":
+                            t_entries.append((pid, k, a, d))
+                    except ValueError:
+                        continue
         
         if not ct_entries and not t_entries:
             raise ValueError("Не найдены данные игроков")
-        
-        # Проверяем, что все игроки матча есть в статистике
-        match_ct_ids = set(match["team_ct"])
-        match_t_ids = set(match["team_t"])
-        ct_ids = set(pid for pid, _, _, _ in ct_entries)
-        t_ids = set(pid for pid, _, _, _ in t_entries)
-        
-        # Определяем победителя по счёту
-        if score_w > score_l:
-            winner = "ct" if score_w >= score_l else "t"
-        else:
-            # Если счёт равный, проверяем у кого больше убийств
-            ct_total_kills = sum(k for _, k, _, _ in ct_entries)
-            t_total_kills = sum(k for _, k, _, _ in t_entries)
-            winner = "ct" if ct_total_kills > t_total_kills else "t"
-        
-        score_ct = score_w if winner == "ct" else score_l
-        score_t = score_l if winner == "ct" else score_w
         
         # Финальный результат
         _finalize_match(mid, winner, score_ct, score_t, ct_entries, t_entries, uid)
         
     except Exception as e:
-        bot.send_message(uid, f"❌ Ошибка: {e}\n\nПроверьте формат и попробуйте снова.")
+        bot.send_message(uid, f"❌ Ошибка: {e}\n\nПроверьте формат и попробуйте снова.\n\nФормат:\n<code>13:11\nCT\nID K A D, ID K A D, ...\nT\nID K A D, ID K A D, ...</code>", parse_mode="HTML")
         stats_pending[uid] = mid
 
 def _finalize_match(mid, winner, score_ct, score_t, ct_entries, t_entries, admin_uid):
@@ -1461,9 +1433,8 @@ def _finalize_match(mid, winner, score_ct, score_t, ct_entries, t_entries, admin
     
     bot.send_message(admin_uid, f"✅ Матч #{mid} завершён! Статистика сохранена.")
     send_log(f"✅ Матч #{mid}: {winner.upper()} {score_ct}:{score_t}")
-
 # ═══════════════════════════════════════════════════════════════════
-# АДМИН ПАНЕЛЬ (сокращённо)
+# АДМИН ПАНЕЛЬ (УПРАВЛЕНИЕ ИГРОКОМ)
 # ═══════════════════════════════════════════════════════════════════
 
 def _manage_panel(admin_uid, tid):
