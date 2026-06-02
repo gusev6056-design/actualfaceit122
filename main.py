@@ -1,6 +1,8 @@
 import telebot, threading, random, time, io
 from telebot import types
 from datetime import datetime, timedelta
+import os
+from flask import Flask
 
 from config import (TOKEN, ADMIN_ID, MAPS, LOG_CHANNEL_ID, LOG_THREAD_ID,
                     ACCEPT_TIMEOUT, SHOP_ITEMS, ONE_TIME_TYPES)
@@ -29,6 +31,20 @@ from cards import (
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 init_db()
+
+# Flask приложение для Render
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host='0.0.0.0', port=port)
+
+# Запускаем Flask в отдельном потоке
+threading.Thread(target=run_flask, daemon=True).start()
 
 # ── Global state ─────────────────────────────────────────────────────
 active_lobbies  = {}
@@ -1102,7 +1118,6 @@ def handle_admin_mg_input(msg):
             bot.send_message(uid, f"✅ Варнов выдано: {cnt}. Итого: {w}")
             _notify(tid, f"⚠️ Получен варн от администратора! Итого: {w}/3")
         elif state == "adm_mg_ban":
-            # Формат: "7 Оскорбления" или "0 Навсегда"
             parts = text.split(" ", 1)
             if len(parts) < 2:
                 bot.send_message(uid, "❌ Формат: <дни> <причина>\nПример: 7 Оскорбления\nИли: 0 Навсегда")
@@ -1114,7 +1129,7 @@ def handle_admin_mg_input(msg):
             if days_str.isdigit():
                 days = int(days_str)
                 if days == 0:
-                    days = None  # Навсегда
+                    days = None
             else:
                 bot.send_message(uid, "❌ Первым аргументом должны быть дни (число). 0 = навсегда")
                 user_flow[uid] = {"state": "adm_mg_ban"}
