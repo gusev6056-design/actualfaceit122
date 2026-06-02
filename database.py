@@ -36,7 +36,15 @@ def init_db():
             warns                INTEGER DEFAULT 0,
             muted_until          TEXT    DEFAULT NULL,
             banned               INTEGER DEFAULT 0,
-            calibration_matches  INTEGER DEFAULT 0
+            calibration_matches  INTEGER DEFAULT 0,
+            warn_reasons         TEXT    DEFAULT NULL,
+            warn_by              TEXT    DEFAULT NULL,
+            mute_reason          TEXT    DEFAULT NULL,
+            mute_by              TEXT    DEFAULT NULL,
+            ban_until            TEXT    DEFAULT NULL,
+            ban_reason           TEXT    DEFAULT NULL,
+            ban_by               TEXT    DEFAULT NULL,
+            ban_type             TEXT    DEFAULT NULL
         )
     ''')
 
@@ -47,6 +55,14 @@ def init_db():
         ("muted_until",        "TEXT DEFAULT NULL"),
         ("banned",             "INTEGER DEFAULT 0"),
         ("calibration_matches","INTEGER DEFAULT 0"),
+        ("warn_reasons",       "TEXT DEFAULT NULL"),
+        ("warn_by",            "TEXT DEFAULT NULL"),
+        ("mute_reason",        "TEXT DEFAULT NULL"),
+        ("mute_by",            "TEXT DEFAULT NULL"),
+        ("ban_until",          "TEXT DEFAULT NULL"),
+        ("ban_reason",         "TEXT DEFAULT NULL"),
+        ("ban_by",             "TEXT DEFAULT NULL"),
+        ("ban_type",           "TEXT DEFAULT NULL"),
     ]:
         try:
             cur.execute(f"ALTER TABLE players ADD COLUMN {col} {dfn}")
@@ -299,7 +315,6 @@ def set_player_stats(user_id, kills=None, deaths=None, assists=None,
     conn.commit(); conn.close()
 
 def update_stats(user_id, kills, deaths, assists, headshots, avg_damage, win, league=None):
-    """Update overall stats + league stats. Returns (calib_count, new_elo)."""
     conn = sqlite3.connect(DB)
     cur  = conn.cursor()
     cur.execute("SELECT calibration_matches, elo FROM players WHERE user_id=?", (user_id,))
@@ -388,13 +403,11 @@ def add_inventory_item(user_id, item_name, item_type, days=None, item_id=None, a
     row_id = cur.lastrowid; conn.commit(); conn.close(); return row_id
 
 def remove_inventory_item(inv_id):
-    """Hard-delete (admin remove or one-time use)."""
     conn = sqlite3.connect(DB)
     conn.execute("DELETE FROM inventory WHERE id=?", (inv_id,))
     conn.commit(); conn.close()
 
 def deactivate_inventory_item(inv_id):
-    """Soft-delete (item used up)."""
     conn = sqlite3.connect(DB)
     conn.execute("UPDATE inventory SET active=0 WHERE id=?", (inv_id,))
     conn.commit(); conn.close()
@@ -414,7 +427,6 @@ def has_active_item_type(user_id, item_type):
     row = cur.fetchone(); conn.close(); return row is not None
 
 def cleanup_expired_items():
-    """Remove items whose expires_at has passed. Call periodically."""
     conn = sqlite3.connect(DB)
     now  = datetime.now().isoformat()
     conn.execute("DELETE FROM inventory WHERE expires_at IS NOT NULL AND expires_at < ? AND active=1", (now,))
@@ -491,71 +503,177 @@ def get_map_stats():
     return result
 
 
-# ── Warn / Mute / Ban ──────────────────────────────────────
+# ── Расширенная система наказаний ──────────────────────────────────────
 
-def add_warn(user_id):
+def add_warn(user_id, reason=None, admin_id=None):
+    """Добавить варн с причиной и кто выдал"""
     conn = sqlite3.connect(DB)
-    cur  = conn.cursor()
-    cur.execute("UPDATE players SET warns=warns+1 WHERE user_id=?", (user_id,))
-    cur.execute("SELECT warns FROM players WHERE user_id=?", (user_id,))
-    row = cur.fetchone(); conn.commit(); conn.close()
-    return row[0] if row else 1
+    cur = conn.cursor()
+    
+    cur.execute("SELECT warns, warn_reasons, warn_by FROM players WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    
+    current_warns = row[0] if row else 0
+    current_reasons = row[1] if row and row[1] else ""
+    current_by = row[2] if row and row[2] else ""
+    
+    new_warns = current_warns + 1
+    
+    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    new_reason_entry = f"[{timestamp}] {reason if reason else 'Не принял матч'}"
+    new_by_entry = f"[{timestamp}] {admin_id if admin_id else 'Система'}"
+    
+    updated_reasons = f"{current_reasons}\n{new_reason_entry}" if current_reasons else new_reason_entry
+    updated_by = f"{current_by}\n{new_by_entry}" if current_by else new_by_entry
+    
+    cur.execute("""
+        UPDATE players SET 
+            warns=?, 
+            warn_reasons=?, 
+            warn_by=?
+        WHERE user_id=?
+    """, (new_warns, updated_reasons, updated_by, user_id))
+    
+    conn.commit()
+    conn.close()
+    return new_warns
 
 def remove_warn(user_id):
+    """Снять один варн"""
     conn = sqlite3.connect(DB)
-    cur  = conn.cursor()
+    cur = conn.cursor()
     cur.execute("UPDATE players SET warns=MAX(0,warns-1) WHERE user_id=?", (user_id,))
     cur.execute("SELECT warns FROM players WHERE user_id=?", (user_id,))
-    row = cur.fetchone(); conn.commit(); conn.close()
+    row = cur.fetchone()
+    conn.commit()
+    conn.close()
     return row[0] if row else 0
 
 def clear_warns(user_id):
+    """Очистить все варны"""
     conn = sqlite3.connect(DB)
-    conn.execute("UPDATE players SET warns=0 WHERE user_id=?", (user_id,))
-    conn.commit(); conn.close()
+    conn.execute("UPDATE players SET warns=0, warn_reasons=NULL, warn_by=NULL WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
 
-def get_warns(user_id):
+def get_warns_full(user_id):
+    """Получить полную информацию о варнах"""
     conn = sqlite3.connect(DB)
-    cur  = conn.cursor()
-    cur.execute("SELECT warns FROM players WHERE user_id=?", (user_id,))
-    row = cur.fetchone(); conn.close()
-    return row[0] if row else 0
+    cur = conn.cursor()
+    cur.execute("SELECT warns, warn_reasons, warn_by FROM players WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return {"count": row[0] or 0, "reasons": row[1], "by": row[2]}
+    return {"count": 0, "reasons": None, "by": None}
 
-def mute_player(user_id, hours=24):
+def mute_player(user_id, hours=2, reason=None, admin_id=None):
+    """Замутить игрока"""
     conn = sqlite3.connect(DB)
     until = (datetime.now() + timedelta(hours=hours)).isoformat()
-    conn.execute("UPDATE players SET muted_until=? WHERE user_id=?", (until, user_id))
-    conn.commit(); conn.close(); return until
+    conn.execute("""
+        UPDATE players SET 
+            muted_until=?, 
+            mute_reason=?, 
+            mute_by=?
+        WHERE user_id=?
+    """, (until, reason, admin_id, user_id))
+    conn.commit()
+    conn.close()
+    return until
 
 def unmute_player(user_id):
+    """Снять мут"""
     conn = sqlite3.connect(DB)
-    conn.execute("UPDATE players SET muted_until=NULL WHERE user_id=?", (user_id,))
-    conn.commit(); conn.close()
+    conn.execute("UPDATE players SET muted_until=NULL, mute_reason=NULL, mute_by=NULL WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
 
-def is_muted(user_id):
+def is_muted_full(user_id):
+    """Проверить, замучен ли игрок, с деталями"""
     conn = sqlite3.connect(DB)
-    cur  = conn.cursor()
-    cur.execute("SELECT muted_until FROM players WHERE user_id=?", (user_id,))
-    row = cur.fetchone(); conn.close()
-    if not row or not row[0]: return False, None
+    cur = conn.cursor()
+    cur.execute("SELECT muted_until, mute_reason, mute_by FROM players WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return False, None, None, None
     until = datetime.fromisoformat(row[0])
     if datetime.now() >= until:
-        unmute_player(user_id); return False, None
-    return True, row[0]
+        unmute_player(user_id)
+        return False, None, None, None
+    return True, row[0], row[1], row[2]
 
-def ban_player(user_id):
+def ban_player(user_id, days=None, reason=None, admin_id=None):
+    """Забанить игрока (навсегда или на days дней)"""
     conn = sqlite3.connect(DB)
-    conn.execute("UPDATE players SET banned=1 WHERE user_id=?", (user_id,))
-    conn.commit(); conn.close()
+    
+    if days:
+        until = (datetime.now() + timedelta(days=days)).isoformat()
+        ban_type = "temporary"
+    else:
+        until = None
+        ban_type = "permanent"
+    
+    conn.execute("""
+        UPDATE players SET 
+            banned=1, 
+            ban_until=?, 
+            ban_reason=?, 
+            ban_by=?, 
+            ban_type=?
+        WHERE user_id=?
+    """, (until, reason, admin_id, ban_type, user_id))
+    conn.commit()
+    conn.close()
 
 def unban_player(user_id):
+    """Разбанить игрока"""
     conn = sqlite3.connect(DB)
-    conn.execute("UPDATE players SET banned=0 WHERE user_id=?", (user_id,))
-    conn.commit(); conn.close()
+    conn.execute("""
+        UPDATE players SET 
+            banned=0, 
+            ban_until=NULL, 
+            ban_reason=NULL, 
+            ban_by=NULL, 
+            ban_type=NULL
+        WHERE user_id=?
+    """, (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_banned_full(user_id):
+    """Проверить, забанен ли игрок, с деталями"""
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT banned, ban_until, ban_reason, ban_by, ban_type FROM players WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    
+    if not row or not row[0]:
+        return False, None, None, None, None
+    
+    if row[1]:
+        ban_until = datetime.fromisoformat(row[1])
+        if datetime.now() >= ban_until:
+            unban_player(user_id)
+            return False, None, None, None, None
+    
+    return True, row[1], row[2], row[3], row[4]
+
+
+# ── Совместимость со старыми функциями ─────────────────────────────────
+
+def get_warns(user_id):
+    """Старая функция для совместимости"""
+    return get_warns_full(user_id)["count"]
+
+def is_muted(user_id):
+    """Старая функция для совместимости"""
+    muted, until, reason, by = is_muted_full(user_id)
+    return muted, until
 
 def is_banned(user_id):
-    conn = sqlite3.connect(DB)
-    cur  = conn.cursor()
-    cur.execute("SELECT banned FROM players WHERE user_id=?", (user_id,))
-    row = cur.fetchone(); conn.close()
-    return bool(row and row[0])
+    """Старая функция для совместимости"""
+    banned, until, reason, by, ban_type = is_banned_full(user_id)
+    return banned
