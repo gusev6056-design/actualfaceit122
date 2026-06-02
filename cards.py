@@ -21,9 +21,13 @@ def get_font(size, bold=False):
         "C:\\Windows\\Fonts\\Arial.ttf",
     ]
     try:
+        if bold:
+            return ImageFont.truetype(font_paths[0], size)
         return ImageFont.truetype(font_paths[0], size)
     except:
         try:
+            if bold:
+                return ImageFont.truetype(font_paths[1], size)
             return ImageFont.truetype(font_paths[1], size)
         except:
             return ImageFont.load_default()
