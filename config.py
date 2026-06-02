@@ -23,7 +23,6 @@ ITEM_TYPES = {
     "test_quals": "qual",
     "fpl_plus": "qual",
     "x2_coins": "x2coins",
-    "x2coins": "x2coins",
     "unwarn": "unwarn",
     "nick_change": "nick_change",
     "reset_stats": "reset",
