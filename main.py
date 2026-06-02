@@ -7,7 +7,14 @@ from flask import Flask
 
 from config import *
 from database import *
-from cards import *
+from cards import (
+    create_profile_card,
+    create_lobbies_list_card,
+    create_lobby_card,
+    create_top_card,
+    create_shop_card,
+    create_match_registration_card
+)
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 init_db()
