@@ -403,7 +403,7 @@ def handle_nick_change(msg):
     send_log(f"✏️ {old} (#{uid}) → ник: {text}")
 
 # ═══════════════════════════════════════════════════════════════════
-# ПОИСК МАТЧА (ЛОББИ)
+# ПОИСК МАТЧА (ЛОББИ) - 2 КОЛОНКИ
 # ═══════════════════════════════════════════════════════════════════
 
 @bot.message_handler(func=lambda m: m.text == "🎮 Найти матч")
@@ -436,21 +436,43 @@ def _make_lobbies_data(league):
 def _show_lobby_browser(uid, chat_id, device, league):
     lobbies_data = _make_lobbies_data(league)
     img = create_lobby_card(league, lobbies_data)
+    
+    # Создаём кнопки в 2 колонки: MOBILE и PC
     kb = types.InlineKeyboardMarkup(row_width=5)
-    for dv in ("MOBILE", "PC"):
-        row_btns = []
-        for slot in range(1, 6):
-            key = f"{league}_{dv}_{slot}"
-            lob = active_lobbies.get(key)
-            count = len(lob["players"]) if lob else 0
-            st = lob["status"] if lob else "empty"
-            em = "🔴" if st not in ("waiting","empty") else ("🟢" if count > 0 else "⚪")
-            row_btns.append(types.InlineKeyboardButton(f"{em}{dv[0]}{slot}({count})", callback_data=f"join_{league}_{dv}_{slot}"))
-        kb.add(*row_btns)
+    
+    # Ряд MOBILE
+    mobile_btns = []
+    for slot in range(1, 6):
+        key = f"{league}_MOBILE_{slot}"
+        lob = active_lobbies.get(key)
+        count = len(lob["players"]) if lob else 0
+        st = lob["status"] if lob else "empty"
+        em = "🔴" if st not in ("waiting","empty") else ("🟢" if count > 0 else "⚪")
+        mobile_btns.append(types.InlineKeyboardButton(f"{em}{slot}({count})", callback_data=f"join_{league}_MOBILE_{slot}"))
+    
+    # Ряд PC
+    pc_btns = []
+    for slot in range(1, 6):
+        key = f"{league}_PC_{slot}"
+        lob = active_lobbies.get(key)
+        count = len(lob["players"]) if lob else 0
+        st = lob["status"] if lob else "empty"
+        em = "🔴" if st not in ("waiting","empty") else ("🟢" if count > 0 else "⚪")
+        pc_btns.append(types.InlineKeyboardButton(f"{em}{slot}({count})", callback_data=f"join_{league}_PC_{slot}"))
+    
+    kb.row(*mobile_btns)
+    kb.row(*pc_btns)
+    
+    # Кнопки переключения лиг
     kb.add(
         types.InlineKeyboardButton("🎮 Default", callback_data=f"browse_default_{device}"),
         types.InlineKeyboardButton("⭐ QUALS", callback_data=f"browse_quals_{device}")
     )
+    
+    # Кнопка добавления ботов (только для админов)
+    if _is_admin(uid):
+        kb.add(types.InlineKeyboardButton("🤖 Добавить ботов в лобби", callback_data=f"add_bots_{league}"))
+    
     bot.send_photo(chat_id, img, caption=f"🎮 Выбери слот (Лига: {'QUALS' if league!='default' else 'Default'})", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("browse_"))
@@ -458,6 +480,79 @@ def cb_browse(c):
     _, league, device = c.data.split("_", 2)
     bot.answer_callback_query(c.id)
     _show_lobby_browser(c.from_user.id, c.message.chat.id, device, league)
+
+# Обработчик добавления ботов в лобби
+@bot.callback_query_handler(func=lambda c: c.data.startswith("add_bots_"))
+def cb_add_bots(c):
+    if not _is_admin(c.from_user.id):
+        bot.answer_callback_query(c.id, "Нет доступа")
+        return
+    
+    league = c.data.split("_")[2]
+    bot.answer_callback_query(c.id)
+    
+    # Выбор слота для добавления ботов
+    kb = types.InlineKeyboardMarkup(row_width=5)
+    btns = []
+    for slot in range(1, 6):
+        btns.append(types.InlineKeyboardButton(f"MOBILE {slot}", callback_data=f"bots_do_{league}_MOBILE_{slot}"))
+    kb.row(*btns)
+    
+    btns2 = []
+    for slot in range(1, 6):
+        btns2.append(types.InlineKeyboardButton(f"PC {slot}", callback_data=f"bots_do_{league}_PC_{slot}"))
+    kb.row(*btns2)
+    kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"browse_default_MOBILE"))
+    
+    bot.send_message(c.from_user.id, "🤖 Выбери слот для добавления ботов:", reply_markup=kb)
+
+# Обработчик непосредственного добавления ботов
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bots_do_"))
+def cb_bots_do(c):
+    if not _is_admin(c.from_user.id):
+        bot.answer_callback_query(c.id, "Нет доступа")
+        return
+    
+    parts = c.data.split("_")
+    league = parts[2]
+    device = parts[3]
+    slot = int(parts[4])
+    key = f"{league}_{device}_{slot}"
+    
+    # Получаем всех ботов из БД
+    import sqlite3
+    conn = sqlite3.connect("faceit.db")
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM players WHERE is_bot=1")
+    bots = [row[0] for row in cur.fetchall()]
+    conn.close()
+    
+    # Создаём лобби если не существует
+    if key not in active_lobbies:
+        active_lobbies[key] = {
+            "key": key, "league": league, "device": device, "slot": slot,
+            "players": [], "status": "waiting", "ready": set(),
+            "bans": [], "map_pool": list(MAPS), "all_maps": list(MAPS),
+            "captain_ct": None, "captain_t": None,
+            "team_ct": [], "team_t": [], "veto_turn": "ct", "ban_count": 0,
+            "match_id": None
+        }
+    
+    lob = active_lobbies[key]
+    
+    added = 0
+    for bot_id in bots:
+        if len(lob["players"]) >= 10:
+            break
+        if bot_id not in lob["players"]:
+            lob["players"].append(bot_id)
+            user_lobby[bot_id] = key
+            added += 1
+    
+    bot.answer_callback_query(c.id, f"✅ Добавлено {added} ботов в лобби {device} {slot}")
+    
+    # Обновляем отображение
+    _show_lobby_browser(c.from_user.id, c.message.chat.id, "MOBILE", league)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("join_"))
 def cb_join(c):
@@ -764,7 +859,7 @@ def _start_match(key, map_name):
     send_log(f"⚔️ Матч #{mid} | {map_name} | {key}")
 
 # ═══════════════════════════════════════════════════════════════════
-# РЕЗУЛЬТАТ МАТЧА
+# РЕЗУЛЬТАТ МАТЧА (сокращённо, остальное без изменений)
 # ═══════════════════════════════════════════════════════════════════
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("result_"))
@@ -913,7 +1008,7 @@ def _finalize_match(mid, winner, score_ct, score_t, ct_entries, t_entries, admin
     send_log(f"✅ Матч #{mid}: {winner.upper()} {score_ct}:{score_t}")
 
 # ═══════════════════════════════════════════════════════════════════
-# АДМИН ПАНЕЛЬ
+# АДМИН ПАНЕЛЬ (сокращённо, основные функции)
 # ═══════════════════════════════════════════════════════════════════
 
 @bot.message_handler(func=lambda m: m.text == "⚙️ Админ панель")
