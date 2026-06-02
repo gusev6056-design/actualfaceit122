@@ -22,7 +22,9 @@ from database import (
     add_warn, remove_warn, clear_warns, get_warns, get_warns_full,
     mute_player, unmute_player, is_muted, is_muted_full,
     ban_player, unban_player, is_banned, is_banned_full,
-    is_calibrated, calib_count, CALIB_THRESHOLD
+    is_calibrated, calib_count, CALIB_THRESHOLD,
+    create_ticket, get_tickets, get_ticket, resolve_ticket,
+    reset_season, get_season_stats
 )
 from cards import (
     create_profile_card, create_map_card, create_top_card,
@@ -121,6 +123,45 @@ def _notify(uid, text):
     except:
         pass
 
+def _get_player_info(uid):
+    """Получить информацию об игроке для отображения в лобби"""
+    p = get_player(uid)
+    if not p:
+        return None
+    calib = calib_count(p)
+    is_cal = is_calibrated(p)
+    if is_cal:
+        calib_text = f"✅ {p[5]} ELO"
+    else:
+        calib_text = f"📊 {calib}/{CALIB_THRESHOLD}"
+    return {
+        "name": p[1],
+        "level": p[4],
+        "elo": p[5],
+        "calib_text": calib_text,
+        "is_calibrated": is_cal
+    }
+
+def _get_lobby_status_text(lob):
+    """Сформировать текст статуса лобби"""
+    league_name = "⭐ QUALS" if lob["league"] == "quals" else "🎮 DEFAULT"
+    text = f"┌─────────────────────────────┐\n"
+    text += f"│ {league_name} │ Слот {lob['slot']} │ {lob['device']}\n"
+    text += f"├─────────────────────────────┤\n"
+    text += f"│ 👥 Игроки: {len(lob['players'])}/10\n"
+    text += f"├─────────────────────────────┤\n"
+    
+    for i, uid in enumerate(lob["players"], 1):
+        info = _get_player_info(uid)
+        if info:
+            ready_mark = "✅" if uid in lob["ready"] else "⏳"
+            text += f"│ {i}. {ready_mark} {info['name']} | Lv{info['level']} | {info['calib_text']}\n"
+        else:
+            text += f"│ {i}. ❌ Неизвестный игрок\n"
+    
+    text += f"└─────────────────────────────┘"
+    return text
+
 def _stats_for_league(player, league):
     if league == "all":
         kills = player[9] or 0
@@ -167,39 +208,30 @@ def _profile_kb(uid, current="all"):
 def _send_profile(uid, chat_id, league="all"):
     p = get_player(uid)
     if not p:
-        bot.send_message(chat_id, "Игрок не найден.")
+        bot.send_message(chat_id, "❌ Игрок не найден")
         return
     stats = _stats_for_league(p, league)
     badges = [b for b in (p[22] or "").split(",") if b]
-    img = create_profile_card(p, stats, badges, _league_label(league))
-    bot.send_photo(chat_id, img, reply_markup=_profile_kb(uid, league))
+    try:
+        img = create_profile_card(p, stats, badges, _league_label(league))
+        bot.send_photo(chat_id, img, reply_markup=_profile_kb(uid, league))
+    except Exception as e:
+        text = (f"👤 <b>{p[1]}</b>\n"
+                f"LVL {stats['level']} | ELO: {stats['elo']}\n"
+                f"💰 Монеты: {stats['coins']}\n"
+                f"📊 K/D: {stats['kd']} | Винрейт: {stats['winrate']}%\n"
+                f"🏆 Победы: {stats['wins']} | Поражения: {stats['losses']}\n"
+                f"🎯 Убийства: {stats['kills']} | Смерти: {stats['deaths']}")
+        bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=_profile_kb(uid, league))
 
 def _main_menu_kb(uid):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row("🎮 Найти матч", "👤 Профиль")
     kb.row("🏆 Топ", "🛒 Магазин", "🎒 Инвентарь")
+    kb.row("📋 Подать жалобу")
     if _is_admin(uid):
         kb.row("⚙️ Админ панель")
     return kb
-
-# ═══════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ АДМИНКИ
-# ═══════════════════════════════════════════════════════════════════
-
-def _unmute_player_action(admin_uid, tid):
-    unmute_player(tid)
-    bot.send_message(admin_uid, f"✅ Мут снят с игрока {_pname(tid)}")
-    _notify(tid, "✅ Администратор снял с вас мут")
-
-def _unban_player_action(admin_uid, tid):
-    unban_player(tid)
-    bot.send_message(admin_uid, f"✅ Бан снят с игрока {_pname(tid)}")
-    _notify(tid, "✅ Администратор снял с вас бан")
-
-def _clear_warns_action(admin_uid, tid):
-    clear_warns(tid)
-    bot.send_message(admin_uid, f"✅ Варны сброшены у игрока {_pname(tid)}")
-    _notify(tid, "✅ Администратор сбросил ваши варны")
 
 # ═══════════════════════════════════════════════════════════════════
 # /START
@@ -227,8 +259,7 @@ def cmd_help(msg):
                      "📋 <b>Команды:</b>\n"
                      "/start — меню\n/profile — профиль\n/top — топ\n"
                      "/shop — магазин\n/inv — инвентарь\n"
-                     "/play — калибровочные матчи\n"
-                     "/ticket <id матча> <причина> — подать жалобу\n\n"
+                     "/play — калибровочные матчи\n\n"
                      "👮 <b>Админ:</b>\n"
                      "/manage <id/@ник> — управление игроком\n"
                      "/addbot ник id [device] — создать бота\n"
@@ -327,8 +358,15 @@ def cmd_play(msg):
 def cmd_top(msg):
     if check_ban(msg.from_user.id, msg.chat.id):
         return
-    img = create_top_card(get_top_players(10))
-    bot.send_photo(msg.chat.id, img)
+    try:
+        img = create_top_card(get_top_players(10))
+        bot.send_photo(msg.chat.id, img)
+    except Exception as e:
+        top = get_top_players(10)
+        text = "🏆 <b>Топ игроков</b>\n\n"
+        for i, (name, gid, elo, wins, losses, kills, deaths) in enumerate(top, 1):
+            text += f"{i}. {name} — {elo} ELO\n"
+        bot.send_message(msg.chat.id, text, parse_mode="HTML")
 
 # ═══════════════════════════════════════════════════════════════════
 # МАГАЗИН
@@ -356,8 +394,14 @@ def _show_shop(uid, chat_id, cat):
     p = get_player(uid)
     coins = p[6] if p else 0
     items = SHOP_ITEMS.get(cat, [])
-    img = create_shop_card(cat, items, coins)
-    bot.send_photo(chat_id, img, reply_markup=_shop_kb(cat, items))
+    try:
+        img = create_shop_card(cat, items, coins)
+        bot.send_photo(chat_id, img, reply_markup=_shop_kb(cat, items))
+    except:
+        text = f"🛒 <b>Магазин</b>\n💰 Монет: {coins}\n\n"
+        for item in items:
+            text += f"• {item['name']} — {item['price']} 💰\n"
+        bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=_shop_kb(cat, items))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("shop_"))
 def cb_shop_tab(c):
@@ -396,13 +440,21 @@ def cmd_inv(msg):
         return
     p = get_player(uid)
     inv = get_inventory(uid)
-    img = create_inventory_card(p, inv)
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    for row in inv:
-        inv_id, iname, itype, item_id, activated, expires = row
-        lbl = ("✅ " if activated else "⚡ ") + iname[:28]
-        kb.add(types.InlineKeyboardButton(lbl, callback_data=f"inv_{inv_id}"))
-    bot.send_photo(msg.chat.id, img, reply_markup=kb)
+    try:
+        img = create_inventory_card(p, inv)
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for row in inv:
+            inv_id, iname, itype, item_id, activated, expires = row
+            lbl = ("✅ " if activated else "⚡ ") + iname[:28]
+            kb.add(types.InlineKeyboardButton(lbl, callback_data=f"inv_{inv_id}"))
+        bot.send_photo(msg.chat.id, img, reply_markup=kb)
+    except:
+        text = f"🎒 <b>Инвентарь</b>\n\n"
+        for row in inv:
+            inv_id, iname, itype, item_id, activated, expires = row
+            status = "✅" if activated else "⚡"
+            text += f"{status} {iname}\n"
+        bot.send_message(msg.chat.id, text, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("inv_") and not c.data.startswith("inv_act") and not c.data.startswith("inv_mg"))
 def cb_inv(c):
@@ -424,7 +476,7 @@ def cb_inv(c):
             return
         remove_warn(uid)
         remove_inventory_item(inv_id)
-        bot.answer_callback_query(c.id, f"✅ Варн снят! Осталось варнов: {get_warns(uid)}", show_alert=True)
+        bot.answer_callback_query(c.id, f"✅ Варн снят! Осталось: {get_warns(uid)}", show_alert=True)
         send_log(f"🟡 {_pname(uid)} использовал «Снять Warn»")
         return
 
@@ -473,7 +525,7 @@ def handle_nick_change(msg):
     send_log(f"✏️ {old} (#{uid}) → ник: {text}")
 
 # ═══════════════════════════════════════════════════════════════════
-# ПОИСК МАТЧА (ЛОББИ) - 2 КОЛОНКИ
+# ПОИСК МАТЧА (ЛОББИ) - 2 КОЛОНКИ + СЧЁТЧИК + ВЫХОД
 # ═══════════════════════════════════════════════════════════════════
 
 @bot.message_handler(func=lambda m: m.text == "🎮 Найти матч")
@@ -507,11 +559,18 @@ def _make_lobbies_data(league):
 
 def _show_lobby_browser(uid, chat_id, device, league):
     lobbies_data = _make_lobbies_data(league)
-    img = create_lobby_card(league, lobbies_data)
+    try:
+        img = create_lobby_card(league, lobbies_data)
+        bot.send_photo(chat_id, img, caption=f"🎮 Лобби {league.upper()}")
+    except:
+        text = f"🎮 <b>Лобби {league.upper()}</b>\n\n"
+        for lob in lobbies_data:
+            em = "🔴" if lob["status"] not in ("waiting", "empty") else ("🟢" if lob["count"] > 0 else "⚪")
+            text += f"{em} {lob['device']} {lob['slot']}: {lob['count']}/10\n"
+        bot.send_message(chat_id, text, parse_mode="HTML")
 
     kb = types.InlineKeyboardMarkup(row_width=5)
 
-    # Ряд MOBILE (5 кнопок)
     mobile_btns = []
     for slot in range(1, 6):
         key = f"{league}_MOBILE_{slot}"
@@ -525,7 +584,6 @@ def _show_lobby_browser(uid, chat_id, device, league):
         mobile_btns.append(types.InlineKeyboardButton(f"{em}{slot}({count})", callback_data=f"join_{league}_MOBILE_{slot}"))
     kb.row(*mobile_btns)
 
-    # Ряд PC (5 кнопок)
     pc_btns = []
     for slot in range(1, 6):
         key = f"{league}_PC_{slot}"
@@ -539,19 +597,15 @@ def _show_lobby_browser(uid, chat_id, device, league):
         pc_btns.append(types.InlineKeyboardButton(f"{em}{slot}({count})", callback_data=f"join_{league}_PC_{slot}"))
     kb.row(*pc_btns)
 
-    # Кнопки переключения лиг
     kb.add(
         types.InlineKeyboardButton("🎮 Default", callback_data=f"browse_default_{device}"),
         types.InlineKeyboardButton("⭐ QUALS", callback_data=f"browse_quals_{device}")
     )
 
-    # Кнопка добавления ботов (только для админов)
     if _is_admin(uid):
-        kb.add(types.InlineKeyboardButton("🤖 Добавить ботов в лобби", callback_data=f"add_bots_{league}"))
+        kb.add(types.InlineKeyboardButton("🤖 Добавить ботов", callback_data=f"add_bots_{league}"))
 
-    bot.send_photo(chat_id, img,
-                   caption=f"🎮 Выбери слот (Лига: {'QUALS' if league != 'default' else 'Default'})",
-                   reply_markup=kb)
+    bot.send_message(chat_id, "🎮 Выбери слот:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("browse_"))
 def cb_browse(c):
@@ -559,7 +613,7 @@ def cb_browse(c):
     bot.answer_callback_query(c.id)
     _show_lobby_browser(c.from_user.id, c.message.chat.id, device, league)
 
-# Добавление ботов в лобби
+# ДОБАВЛЕНИЕ БОТОВ
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_bots_"))
 def cb_add_bots(c):
     if not _is_admin(c.from_user.id):
@@ -569,20 +623,44 @@ def cb_add_bots(c):
     league = c.data.split("_")[2]
     bot.answer_callback_query(c.id)
 
+    # Проверяем/создаём ботов
+    conn = sqlite3.connect("faceit.db")
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM players WHERE is_bot=1")
+    bot_count = cur.fetchone()[0]
+    
+    if bot_count < 20:
+        for i in range(bot_count, 20):
+            bot_id = 10000000 + i
+            bot_name = f"Bot_{i+1}"
+            bot_game_id = str(500000 + i)
+            bot_device = "PC" if i % 2 == 0 else "MOBILE"
+            try:
+                cur.execute("""
+                    INSERT OR IGNORE INTO players 
+                    (user_id, username, game_id, device, registered, is_bot, coins, calibration_matches, elo, level)
+                    VALUES(?,?,?,?,1,1,100,10,1000,1)
+                """, (bot_id, bot_name, bot_game_id, bot_device))
+            except:
+                pass
+        conn.commit()
+    
+    cur.execute("SELECT user_id FROM players WHERE is_bot=1")
+    bots = [row[0] for row in cur.fetchall()]
+    conn.close()
+
     kb = types.InlineKeyboardMarkup(row_width=5)
-    # Ряд MOBILE
     btns = []
     for slot in range(1, 6):
         btns.append(types.InlineKeyboardButton(f"MOBILE {slot}", callback_data=f"bots_do_{league}_MOBILE_{slot}"))
     kb.row(*btns)
-    # Ряд PC
     btns2 = []
     for slot in range(1, 6):
         btns2.append(types.InlineKeyboardButton(f"PC {slot}", callback_data=f"bots_do_{league}_PC_{slot}"))
     kb.row(*btns2)
     kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data=f"browse_default_MOBILE"))
 
-    bot.send_message(c.from_user.id, "🤖 Выбери слот для добавления ботов:", reply_markup=kb)
+    bot.send_message(c.from_user.id, f"🤖 Выбери слот для добавления ботов (всего: {len(bots)})", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("bots_do_"))
 def cb_bots_do(c):
@@ -596,14 +674,12 @@ def cb_bots_do(c):
     slot = int(parts[4])
     key = f"{league}_{device}_{slot}"
 
-    # Получаем всех ботов из БД
     conn = sqlite3.connect("faceit.db")
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM players WHERE is_bot=1")
     bots = [row[0] for row in cur.fetchall()]
     conn.close()
 
-    # Создаём лобби если не существует
     if key not in active_lobbies:
         active_lobbies[key] = {
             "key": key, "league": league, "device": device, "slot": slot,
@@ -615,7 +691,6 @@ def cb_bots_do(c):
         }
 
     lob = active_lobbies[key]
-
     added = 0
     for bot_id in bots:
         if len(lob["players"]) >= 10:
@@ -625,9 +700,18 @@ def cb_bots_do(c):
             user_lobby[bot_id] = key
             added += 1
 
-    bot.answer_callback_query(c.id, f"✅ Добавлено {added} ботов в лобби {device} {slot}")
-    send_log(f"🤖 Админ добавил {added} ботов в лобби {key}")
-    _show_lobby_browser(c.from_user.id, c.message.chat.id, "MOBILE", league)
+    bot.answer_callback_query(c.id, f"✅ Добавлено {added} ботов")
+    send_log(f"🤖 Админ добавил {added} ботов в {key}")
+    
+    # Отправляем обновлённый статус лобби
+    status_text = _get_lobby_status_text(lob)
+    for uid in lob["players"]:
+        try:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🚪 Выйти из лобби", callback_data=f"leave_lobby_{key}"))
+            bot.send_message(uid, status_text, parse_mode="HTML", reply_markup=kb)
+        except:
+            pass
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("join_"))
 def cb_join(c):
@@ -683,7 +767,17 @@ def cb_join(c):
     lob["players"].append(uid)
     user_lobby[uid] = key
     name = _pname(uid)
-    _bcast(lob, f"👤 <b>{name}</b> вошёл. [{len(lob['players'])}/10]")
+    
+    # Отправляем обновлённый статус всем в лобби
+    status_text = _get_lobby_status_text(lob)
+    for member_uid in lob["players"]:
+        try:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🚪 Выйти из лобби", callback_data=f"leave_lobby_{key}"))
+            bot.send_message(member_uid, status_text, parse_mode="HTML", reply_markup=kb)
+        except:
+            pass
+    
     send_log(f"👤 {name} → {key} [{len(lob['players'])}/10]")
 
     if len(lob["players"]) >= 10:
@@ -701,8 +795,19 @@ def cb_leave_lobby(c):
         return
 
     _leave_lobby(uid, key)
+    
+    # Отправляем обновлённый статус оставшимся игрокам
+    if lob["players"]:
+        status_text = _get_lobby_status_text(lob)
+        for member_uid in lob["players"]:
+            try:
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("🚪 Выйти из лобби", callback_data=f"leave_lobby_{key}"))
+                bot.send_message(member_uid, status_text, parse_mode="HTML", reply_markup=kb)
+            except:
+                pass
+    
     bot.send_message(uid, f"✅ Ты покинул лобби {key}")
-    _bcast(lob, f"👤 {_pname(uid)} покинул лобби. [{len(lob['players'])}/10]")
 
 def _bcast(lob, text, markup=None):
     for uid in lob["players"]:
@@ -744,18 +849,19 @@ def _start_accept(key):
     lob["status"] = "accept"
     lob["ready"] = set()
     send_log(f"⚔️ {key}: 10 игроков — Accept")
+    
+    # Отправляем статус с кнопкой принятия
+    status_text = _get_lobby_status_text(lob)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("✅ Принять матч", callback_data=f"accept_{key}"))
+    kb.add(types.InlineKeyboardButton("🚪 Выйти из лобби", callback_data=f"leave_lobby_{key}"))
+    
     for uid in lob["players"]:
         if _is_bot_player(uid):
             lob["ready"].add(uid)
             continue
         try:
-            bot.send_message(uid,
-                             f"⚔️ <b>Матч найден!</b>\n\n"
-                             f"Лига: {lob['league'].upper()} | Слот: {lob['slot']}\n"
-                             f"⏳ <b>{ACCEPT_TIMEOUT} секунд</b> чтобы принять!",
-                             reply_markup=kb, parse_mode="HTML")
+            bot.send_message(uid, f"⚔️ <b>Матч найден!</b>\n\n{status_text}\n\n⏳ <b>{ACCEPT_TIMEOUT} секунд</b> чтобы принять!", reply_markup=kb, parse_mode="HTML")
         except Exception:
             pass
         _start_accept_timer(key, uid)
@@ -820,6 +926,18 @@ def cb_accept(c):
     lob["ready"].add(uid)
     _cancel_timer(key, uid)
     bot.answer_callback_query(c.id, "✅ Принято!")
+    
+    # Обновляем статус для всех
+    status_text = _get_lobby_status_text(lob)
+    for member_uid in lob["players"]:
+        try:
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("✅ Принять матч", callback_data=f"accept_{key}"))
+            kb.add(types.InlineKeyboardButton("🚪 Выйти из лобби", callback_data=f"leave_lobby_{key}"))
+            bot.send_message(member_uid, status_text, reply_markup=kb, parse_mode="HTML")
+        except:
+            pass
+    
     _check_all_ready(key)
 
 def _check_all_ready(key):
@@ -873,21 +991,28 @@ def _send_veto(key):
         threading.Timer(2.0, _bot_ban, [key]).start()
         return
     ms = get_map_stats()
-    img = create_map_card(lob, ms)
-    kb = types.InlineKeyboardMarkup(row_width=3)
-    for m in lob["map_pool"]:
-        kb.add(types.InlineKeyboardButton(f"❌ {m}", callback_data=f"ban_{key}_{m}"))
-    cap_name = _pname(cap_id)
-    caption = (f"🗺 <b>ВЕТО</b> — Бан {lob['ban_count'] + 1}/4\n"
-               f"Ход <b>{'CT' if turn == 'ct' else 'T'}</b> — {cap_name}")
-    for uid in lob["players"]:
-        try:
-            if uid == cap_id:
-                bot.send_photo(uid, img, caption=caption, reply_markup=kb, parse_mode="HTML")
-            else:
-                bot.send_photo(uid, img, caption=caption, parse_mode="HTML")
-        except Exception:
-            pass
+    try:
+        img = create_map_card(lob, ms)
+        kb = types.InlineKeyboardMarkup(row_width=3)
+        for m in lob["map_pool"]:
+            kb.add(types.InlineKeyboardButton(f"❌ {m}", callback_data=f"ban_{key}_{m}"))
+        cap_name = _pname(cap_id)
+        caption = (f"🗺 <b>ВЕТО</b> — Бан {lob['ban_count'] + 1}/4\n"
+                   f"Ход <b>{'CT' if turn == 'ct' else 'T'}</b> — {cap_name}")
+        for uid in lob["players"]:
+            try:
+                if uid == cap_id:
+                    bot.send_photo(uid, img, caption=caption, reply_markup=kb, parse_mode="HTML")
+                else:
+                    bot.send_photo(uid, img, caption=caption, parse_mode="HTML")
+            except Exception:
+                pass
+    except:
+        text = f"🗺 ВЕТО — Бан {lob['ban_count'] + 1}/4\nХод {turn.upper()}\n\nДоступные карты:\n" + "\n".join(lob["map_pool"])
+        kb = types.InlineKeyboardMarkup(row_width=3)
+        for m in lob["map_pool"]:
+            kb.add(types.InlineKeyboardButton(f"❌ {m}", callback_data=f"ban_{key}_{m}"))
+        bot.send_message(cap_id, text, reply_markup=kb, parse_mode="HTML")
 
 def _bot_ban(key):
     lob = active_lobbies.get(key)
@@ -961,22 +1086,71 @@ def _start_match(key, map_name):
         user_match[uid] = mid
     ct_rows = [get_player(u) for u in lob["team_ct"]]
     t_rows = [get_player(u) for u in lob["team_t"]]
-    img = create_match_start_card(mid, map_name, league,
-                                  lob["team_ct"], lob["team_t"], ct_rows, t_rows)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📸 Отправить результат", callback_data=f"result_{mid}"))
-    for uid in lob["team_ct"] + lob["team_t"]:
-        side = "CT" if uid in lob["team_ct"] else "T"
-        try:
-            bot.send_photo(uid, img,
-                           caption=f"⚔️ <b>Матч #{mid} начался!</b>\nКарта: {map_name} | Команда: <b>{side}</b>",
-                           reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            pass
+    try:
+        img = create_match_start_card(mid, map_name, league,
+                                      lob["team_ct"], lob["team_t"], ct_rows, t_rows)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📸 Отправить результат", callback_data=f"result_{mid}"))
+        for uid in lob["team_ct"] + lob["team_t"]:
+            side = "CT" if uid in lob["team_ct"] else "T"
+            try:
+                bot.send_photo(uid, img,
+                               caption=f"⚔️ <b>Матч #{mid} начался!</b>\nКарта: {map_name} | Команда: <b>{side}</b>",
+                               reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                pass
+    except:
+        text = f"⚔️ <b>Матч #{mid} начался!</b>\nКарта: {map_name}\n\nCT: {', '.join(_pname(u) for u in lob['team_ct'])}\nT: {', '.join(_pname(u) for u in lob['team_t'])}"
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📸 Отправить результат", callback_data=f"result_{mid}"))
+        for uid in lob["team_ct"] + lob["team_t"]:
+            side = "CT" if uid in lob["team_ct"] else "T"
+            bot.send_message(uid, f"{text}\n\nКоманда: {side}", reply_markup=kb, parse_mode="HTML")
     send_log(f"⚔️ Матч #{mid} | {map_name} | {key}")
 
 # ═══════════════════════════════════════════════════════════════════
-# РЕЗУЛЬТАТ МАТЧА (сокращённо)
+# СИСТЕМА ЖАЛОБ/ТИКЕТОВ (через кнопку)
+# ═══════════════════════════════════════════════════════════════════
+
+@bot.message_handler(func=lambda m: m.text == "📋 Подать жалобу")
+def cmd_ticket_button(msg):
+    uid = msg.from_user.id
+    if not _check_reg(uid, msg.chat.id):
+        return
+    
+    user_flow[uid] = {"state": "ticket_match_id"}
+    bot.send_message(uid, "📝 Введите ID матча, на который хотите пожаловаться:")
+
+@bot.message_handler(func=lambda m: user_flow.get(m.from_user.id, {}).get("state") == "ticket_match_id")
+def handle_ticket_match_id(msg):
+    uid = msg.from_user.id
+    text = msg.text.strip()
+    
+    if not text.isdigit():
+        bot.send_message(uid, "❌ ID матча должен быть числом. Попробуйте ещё раз:")
+        return
+    
+    match_id = int(text)
+    user_flow[uid] = {"state": "ticket_reason", "match_id": match_id}
+    bot.send_message(uid, "📝 Введите причину жалобы:")
+
+@bot.message_handler(func=lambda m: user_flow.get(m.from_user.id, {}).get("state") == "ticket_reason")
+def handle_ticket_reason(msg):
+    uid = msg.from_user.id
+    reason = msg.text.strip()
+    match_id = user_flow[uid].get("match_id")
+    
+    if not reason:
+        bot.send_message(uid, "❌ Причина не может быть пустой. Попробуйте ещё раз:")
+        return
+    
+    ticket_id = create_ticket(uid, match_id, reason)
+    bot.send_message(uid, f"✅ Жалоба #{ticket_id} создана! Администратор рассмотрит её в ближайшее время.")
+    send_log(f"📋 Новая жалоба #{ticket_id} от {_pname(uid)} на матч #{match_id}")
+    user_flow.pop(uid, None)
+
+# ═══════════════════════════════════════════════════════════════════
+# РЕЗУЛЬТАТ МАТЧА (сокращённо, остальное без изменений)
 # ═══════════════════════════════════════════════════════════════════
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("result_"))
@@ -1127,17 +1301,26 @@ def _finalize_match(mid, winner, score_ct, score_t, ct_entries, t_entries, admin
     _process(ct_entries[:5], "ct", ct_card_data)
     _process(t_entries[:5], "t", t_card_data)
 
-    img = create_match_result_card(mid, map_name, league, score_ct, score_t, winner, ct_card_data, t_card_data)
-
-    for uid in match["team_ct"] + match["team_t"]:
-        try:
-            bot.send_photo(uid, img,
-                           caption=(f"📊 <b>Результат матча #{mid}</b>\n"
-                                    f"{'🏆 CT победили' if winner == 'ct' else '🏆 T победили'} "
-                                    f"{score_ct}:{score_t}"),
-                           parse_mode="HTML")
-        except Exception:
-            pass
+    try:
+        img = create_match_result_card(mid, map_name, league, score_ct, score_t, winner, ct_card_data, t_card_data)
+        for uid in match["team_ct"] + match["team_t"]:
+            try:
+                bot.send_photo(uid, img,
+                               caption=(f"📊 <b>Результат матча #{mid}</b>\n"
+                                        f"{'🏆 CT победили' if winner == 'ct' else '🏆 T победили'} "
+                                        f"{score_ct}:{score_t}"),
+                               parse_mode="HTML")
+            except Exception:
+                pass
+    except:
+        text = (f"📊 <b>Результат матча #{mid}</b>\n"
+                f"{'🏆 CT победили' if winner == 'ct' else '🏆 T победили'} {score_ct}:{score_t}\n"
+                f"Карта: {map_name}")
+        for uid in match["team_ct"] + match["team_t"]:
+            try:
+                bot.send_message(uid, text, parse_mode="HTML")
+            except Exception:
+                pass
 
     key = match.get("lobby_key")
     if key and key in active_lobbies:
@@ -1148,105 +1331,6 @@ def _finalize_match(mid, winner, score_ct, score_t, ct_entries, t_entries, admin
     active_matches.pop(mid, None)
     bot.send_message(admin_uid, f"✅ Матч #{mid} завершён и статистика сохранена!")
     send_log(f"✅ Матч #{mid}: {winner.upper()} {score_ct}:{score_t}")
-
-# ═══════════════════════════════════════════════════════════════════
-# СИСТЕМА ЖАЛОБ/ТИКЕТОВ
-# ═══════════════════════════════════════════════════════════════════
-
-def create_ticket(user_id, match_id, reason):
-    conn = sqlite3.connect("faceit.db")
-    cur = conn.cursor()
-    created_at = datetime.now().isoformat()
-    cur.execute("""
-        INSERT INTO tickets(user_id, match_id, reason, status, created_at)
-        VALUES(?,?,?,?,?)
-    """, (user_id, match_id, reason, 'open', created_at))
-    ticket_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return ticket_id
-
-def get_tickets(status=None):
-    conn = sqlite3.connect("faceit.db")
-    cur = conn.cursor()
-    if status:
-        cur.execute("SELECT * FROM tickets WHERE status=?", (status,))
-    else:
-        cur.execute("SELECT * FROM tickets ORDER BY created_at DESC")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def get_ticket(ticket_id):
-    conn = sqlite3.connect("faceit.db")
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def resolve_ticket(ticket_id, admin_id, admin_comment):
-    conn = sqlite3.connect("faceit.db")
-    cur = conn.cursor()
-    resolved_at = datetime.now().isoformat()
-    cur.execute("""
-        UPDATE tickets SET 
-            status='resolved', 
-            resolved_by=?, 
-            resolved_at=?,
-            admin_comment=?
-        WHERE id=?
-    """, (admin_id, resolved_at, admin_comment, ticket_id))
-    conn.commit()
-    conn.close()
-
-def reset_season():
-    conn = sqlite3.connect("faceit.db")
-    cur = conn.cursor()
-    cur.execute("UPDATE players SET elo=1000, level=1, calibration_matches=0")
-    cur.execute("DELETE FROM league_stats")
-    conn.commit()
-    conn.close()
-
-def get_season_stats():
-    conn = sqlite3.connect("faceit.db")
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM players WHERE registered=1")
-    total_players = cur.fetchone()[0]
-    cur.execute("SELECT AVG(elo) FROM players WHERE registered=1 AND is_bot=0")
-    avg_elo = cur.fetchone()[0] or 1000
-    cur.execute("SELECT username, elo FROM players WHERE registered=1 AND is_bot=0 ORDER BY elo DESC LIMIT 1")
-    top_player = cur.fetchone()
-    conn.close()
-    return {
-        "total_players": total_players,
-        "avg_elo": int(avg_elo),
-        "top_player": top_player[0] if top_player else "None",
-        "top_elo": top_player[1] if top_player else 0
-    }
-
-@bot.message_handler(commands=['ticket'])
-def cmd_ticket(msg):
-    uid = msg.from_user.id
-    if not _check_reg(uid, msg.chat.id):
-        return
-
-    parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2:
-        bot.reply_to(msg, "❌ Формат: /ticket <ID матча> <причина>\nПример: /ticket 12345 Неправильный результат матча")
-        return
-
-    try:
-        match_id = int(parts[0].split()[1] if len(parts[0].split()) > 1 else parts[0].split()[0])
-    except:
-        bot.reply_to(msg, "❌ Укажите ID матча (число)")
-        return
-
-    reason = parts[1] if len(parts) > 1 else "Не указана причина"
-
-    ticket_id = create_ticket(uid, match_id, reason)
-    bot.reply_to(msg, f"✅ Жалоба #{ticket_id} создана! Администратор рассмотрит её в ближайшее время.")
-    send_log(f"📋 Новая жалоба #{ticket_id} от {_pname(uid)} на матч #{match_id}")
 
 # ═══════════════════════════════════════════════════════════════════
 # АДМИН ПАНЕЛЬ (УПРАВЛЕНИЕ ИГРОКОМ)
@@ -1300,7 +1384,6 @@ def cb_manage(c):
     manage_target[uid] = tid
     bot.answer_callback_query(c.id)
 
-    # Мгновенные действия (без ввода текста)
     INSTANT = {
         "unmute": lambda: (_unmute_player_action(uid, tid), _manage_panel(uid, tid)),
         "unban": lambda: (_unban_player_action(uid, tid), _manage_panel(uid, tid)),
@@ -1311,7 +1394,6 @@ def cb_manage(c):
         INSTANT[action]()
         return
 
-    # Действия с вводом текста
     INPUT_STATES = {
         "nick": {"state": "adm_mg_nick", "prompt": "✏️ Введи новый никнейм (2-20 символов):"},
         "gameid": {"state": "adm_mg_gameid", "prompt": "🔢 Введи новый Game ID:"},
@@ -1319,13 +1401,28 @@ def cb_manage(c):
         "elo": {"state": "adm_mg_elo", "prompt": "📊 Введи новое значение ELO:"},
         "warn": {"state": "adm_mg_warn", "prompt": "⚠️ Сколько варнов выдать? (1-3):"},
         "mute": {"state": "adm_mg_mute", "prompt": "🔇 На сколько часов замутить? (по умолч. 2):"},
-        "ban": {"state": "adm_mg_ban", "prompt": "🚫 Введи данные для бана в формате:\n\n<code>дни | причина</code>\n\nПримеры:\n<code>7 | Оскорбления</code> - бан на 7 дней\n<code>0 | Нарушение правил</code> - бан навсегда", parse_mode="HTML"},
+        "ban": {"state": "adm_mg_ban", "prompt": "🚫 Введи данные для бана в формате:\n\nдни | причина\n\nПримеры:\n7 | Оскорбления\n0 | Нарушение правил"},
     }
     
     if action in INPUT_STATES:
         info = INPUT_STATES[action]
         user_flow[uid] = {"state": info["state"], "target": tid}
-        bot.send_message(uid, info["prompt"], parse_mode="HTML" if "parse_mode" in info else None)
+        bot.send_message(uid, info["prompt"])
+
+def _unmute_player_action(admin_uid, tid):
+    unmute_player(tid)
+    bot.send_message(admin_uid, f"✅ Мут снят с игрока {_pname(tid)}")
+    _notify(tid, "✅ Администратор снял с вас мут")
+
+def _unban_player_action(admin_uid, tid):
+    unban_player(tid)
+    bot.send_message(admin_uid, f"✅ Бан снят с игрока {_pname(tid)}")
+    _notify(tid, "✅ Администратор снял с вас бан")
+
+def _clear_warns_action(admin_uid, tid):
+    clear_warns(tid)
+    bot.send_message(admin_uid, f"✅ Варны сброшены у игрока {_pname(tid)}")
+    _notify(tid, "✅ Администратор сбросил ваши варны")
 
 @bot.message_handler(func=lambda m: user_flow.get(m.from_user.id, {}).get("state", "").startswith("adm_mg_"))
 def handle_admin_mg_input(msg):
@@ -1346,90 +1443,68 @@ def handle_admin_mg_input(msg):
         return
     
     try:
-        # ── Изменение ника ─────────────────────────────────────────────
         if state == "adm_mg_nick":
             if not (2 <= len(text) <= 20):
-                bot.send_message(uid, "❌ Никнейм должен быть 2-20 символов. Попробуй ещё раз:")
+                bot.send_message(uid, "❌ Никнейм 2-20 символов")
                 return
             old_name = _pname(tid)
             set_username(tid, text)
-            bot.send_message(uid, f"✅ Ник изменён: <b>{old_name}</b> → <b>{text}</b>", parse_mode="HTML")
-            _notify(tid, f"✏️ Администратор изменил ваш никнейм: {old_name} → {text}")
-            send_log(f"✏️ {_pname(uid)} изменил ник {old_name} → {text}")
+            bot.send_message(uid, f"✅ Ник изменён: {old_name} → {text}")
+            _notify(tid, f"✏️ Администратор изменил ваш ник: {old_name} → {text}")
         
-        # ── Изменение Game ID ─────────────────────────────────────────
         elif state == "adm_mg_gameid":
             if not text.isdigit():
-                bot.send_message(uid, "❌ Game ID должен содержать только цифры. Попробуй ещё раз:")
+                bot.send_message(uid, "❌ Game ID только цифры")
                 return
             set_game_id(tid, text)
             bot.send_message(uid, f"✅ Game ID изменён на: {text}")
-            _notify(tid, f"🔢 Администратор изменил ваш Game ID на: {text}")
         
-        # ── Изменение монет ───────────────────────────────────────────
         elif state == "adm_mg_coins":
             if not text.isdigit():
-                bot.send_message(uid, "❌ Введи число (количество монет):")
+                bot.send_message(uid, "❌ Введи число")
                 return
             set_coins(tid, int(text))
-            bot.send_message(uid, f"✅ Монеты установлены: {text}")
-            _notify(tid, f"💰 Администратор изменил количество монет: {text}")
+            bot.send_message(uid, f"✅ Монеты: {text}")
         
-        # ── Изменение ELO ─────────────────────────────────────────────
         elif state == "adm_mg_elo":
             if not text.isdigit():
-                bot.send_message(uid, "❌ Введи число (ELO):")
+                bot.send_message(uid, "❌ Введи число")
                 return
             e = int(text)
             set_elo(tid, e)
             set_level(tid, elo_to_level(e))
-            bot.send_message(uid, f"✅ ELO установлено: {e} (уровень {elo_to_level(e)})")
-            _notify(tid, f"📊 Администратор изменил ваш ELO на: {e}")
+            bot.send_message(uid, f"✅ ELO: {e} (LV{elo_to_level(e)})")
         
-        # ── Выдача варна ──────────────────────────────────────────────
         elif state == "adm_mg_warn":
-            if not text.isdigit():
-                bot.send_message(uid, "❌ Введи число (количество варнов):")
-                return
-            cnt = min(int(text), 3)
+            cnt = min(int(text) if text.isdigit() else 1, 3)
             w = 0
             for _ in range(cnt):
                 w = add_warn(tid, reason="Выдан администратором", admin_id=uid)
-            bot.send_message(uid, f"✅ Выдано варнов: {cnt}. Теперь у игрока {w}/3")
-            _notify(tid, f"⚠️ Администратор выдал вам {cnt} варн(а)! Всего: {w}/3")
+            bot.send_message(uid, f"✅ Выдано {cnt} варн(а). Теперь {w}/3")
+            _notify(tid, f"⚠️ Администратор выдал {cnt} варн(а). Всего: {w}/3")
         
-        # ── Выдача мута ───────────────────────────────────────────────
         elif state == "adm_mg_mute":
             h = int(text) if text.isdigit() else 2
             until = mute_player(tid, h, reason="По решению администратора", admin_id=uid)
-            bot.send_message(uid, f"✅ Мут на {h} час(ов). До: {until[:16]}")
-            _notify(tid, f"🔇 Администратор замутил вас на {h} час(ов)")
+            bot.send_message(uid, f"✅ Мут на {h}ч. До: {until[:16]}")
+            _notify(tid, f"🔇 Администратор замутил вас на {h}ч")
         
-        # ── Выдача бана ───────────────────────────────────────────────
         elif state == "adm_mg_ban":
             parts = text.split("|")
             if len(parts) < 2:
-                bot.send_message(uid, "❌ Неверный формат!\nИспользуй: <code>дни | причина</code>", parse_mode="HTML")
-                user_flow[uid] = {"state": "adm_mg_ban", "target": tid}
+                bot.send_message(uid, "❌ Формат: дни | причина")
                 return
-            
             days_str = parts[0].strip()
-            reason = parts[1].strip() if len(parts) > 1 else "Нарушение правил"
-            
+            reason = parts[1].strip()
             if not days_str.isdigit():
-                bot.send_message(uid, "❌ Дни должны быть числом! 0 = навсегда")
-                user_flow[uid] = {"state": "adm_mg_ban", "target": tid}
+                bot.send_message(uid, "❌ Дни должны быть числом")
                 return
-            
-            days = int(days_str)
-            if days == 0:
-                days = None
-            
+            days = int(days_str) if int(days_str) > 0 else None
             ban_player(tid, days=days, reason=reason, admin_id=uid)
             ban_text = f"на {days} дней" if days else "НАВСЕГДА"
             bot.send_message(uid, f"✅ Бан выдан: {ban_text}\nПричина: {reason}")
             _notify(tid, f"🚫 Администратор заблокировал вас {ban_text}\nПричина: {reason}")
-            send_log(f"🚫 {_pname(uid)} выдал бан {_pname(tid)} | {ban_text} | {reason}")
+            send_log(f"🚫 Бан {_pname(tid)} от {_pname(uid)} | {ban_text} | {reason}")
     
     except Exception as e:
         bot.send_message(uid, f"❌ Ошибка: {e}")
