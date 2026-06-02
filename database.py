@@ -782,4 +782,4 @@ def get_season_stats():
         "avg_elo": int(avg_elo),
         "top_player": top_player[0] if top_player else "None",
         "top_elo": top_player[1] if top_player else 0
-    }
+    } 
